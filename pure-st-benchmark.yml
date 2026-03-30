@@ -4,12 +4,10 @@
   connection: local
   become: yes
   vars:
-    # Mount points for your Pure ST volumes
     data_mount: "/pg-data"
     wal_mount: "/pg-wal"
     data_file: "/pg-data/test_data.fio"
     wal_file: "/pg-wal/test_wal.fio"
-    
     runtime_sec: 120
     output_dir: "/tmp/fio_results"
 
@@ -27,15 +25,12 @@
           - ansible_mounts | selectattr('mount', 'equalto', wal_mount) | list | length > 0
         fail_msg: "ERROR: Pure ST volumes not found at {{ data_mount }} or {{ wal_mount }}."
 
-    - name: 3. Pre-allocate Test Files (Avoid FS Metadata Latency)
-      shell: |
-        mkdir -p {{ output_dir }}
-        fallocate -l 10G {{ data_file }}
-        fallocate -l 5G {{ wal_file }}
+    - name: 3. Pre-allocate Test Files
+      shell: "fallocate -l 10G {{ data_file }} && fallocate -l 5G {{ wal_file }}"
       args:
         creates: "{{ data_file }}"
 
-    - name: 4. Run Multi-Volume FIO (Postgres Profiles)
+    - name: 4. Run Multi-Volume FIO
       shell: |
         fio --ioengine=io_uring --direct=1 --group_reporting --time_based \
         --runtime={{ runtime_sec }} --output-format=json --gtod_reduce=1 \
@@ -43,26 +38,26 @@
         --name=WAL_SYNC_8K  --filename={{ wal_file }}  --bs=8k --rw=write --iodepth=1 --sync=1 \
         --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=4 --sync=1 \
         > {{ output_dir }}/benchmark_results.json
-      args:
-        executable: /bin/bash
 
-    - name: 5. Read JSON Results
+    - name: 5. Read and Parse JSON Results
       slurp:
         src: "{{ output_dir }}/benchmark_results.json"
-      register: fio_json_raw
+      register: fio_raw
 
-    - name: 6. HEADER - Storage Specifications
+    - name: 6. Set FIO Data Fact
+      set_fact:
+        fio_results: "{{ fio_raw.content | b64decode | from_json }}"
+
+    - name: 7. HEADER - Storage Specifications
       debug:
         msg: 
           - "======================================================================"
           - "PURE STORAGE //ST PERFORMANCE REPORT (NVMe-oF RoCE)"
           - "Target: 18M IOPS | 200GB/s BW | Consistent Ultra-Low Latency"
-          - "Design: Bypasses Dedupe/Compression for Ultra-Performance"
+          - "Design: Bypasses Latency-Inducing Functionality"
           - "======================================================================"
 
-    - name: 7. DETAIL - Per Volume Results
-      vars:
-        fio_data: "{{ fio_json_raw.content | b64decode | from_json }}"
+    - name: 8. DETAIL - Per Volume Results
       debug:
         msg: 
           - "JOB:         {{ item.jobname }}"
@@ -72,7 +67,7 @@
           - "p99 LATENCY: {{ p99_val }} us"
           - "STATUS:      {{ '✅ PASS (<1ms)' if p99_val < 1000 else '❌ FAIL (>1ms)' }}"
           - "----------------------------------------------------------------------"
-      loop: "{{ fio_data.jobs }}"
+      loop: "{{ fio_results.jobs }}"
       loop_control:
         label: "{{ item.jobname }}"
       vars:
