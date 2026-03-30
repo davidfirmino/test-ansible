@@ -1,5 +1,5 @@
 ---
-- name: Localhost High-Performance Benchmark - Pure Storage FlashArray//ST
+- name: Final High-Performance Benchmark - Pure Storage FlashArray//ST
   hosts: localhost
   connection: local
   become: yes
@@ -12,62 +12,58 @@
     output_dir: "/tmp/fio_results"
 
   tasks:
-    - name: 1. System Tuning - Increase Memlock limits
+    - name: 1. System Tuning for RoCE (Memlock & AIO)
       shell: |
         prlimit --pid $$ --memlock=unlimited:unlimited
         sysctl -w fs.aio-max-nr=1048576
 
-    - name: 2. Pre-flight check - Verify Pure ST mount points
+    - name: 2. Pre-flight Check - Verify Mounts
       assert:
         that:
           - ansible_mounts | selectattr('mount', 'equalto', data_mount) | list | length > 0
           - ansible_mounts | selectattr('mount', 'equalto', wal_mount) | list | length > 0
-        fail_msg: "CRITICAL: Mount points not found. Ensure NVMe-oF volumes are mounted."
 
-    - name: 3. Create results directory and Pre-allocate files
+    - name: 3. Pre-allocate Test Files (Avoid FS Metadata Latency)
       shell: |
         mkdir -p {{ output_dir }}
         fallocate -l 10G {{ data_file }}
         fallocate -l 5G {{ wal_file }}
 
-    - name: 4. Run Consolidated Multi-Volume FIO
+    - name: 4. Run Multi-Volume FIO (Postgres Profiles)
       shell: |
         fio --ioengine=io_uring --direct=1 --group_reporting --time_based \
         --runtime={{ runtime_sec }} --output-format=json --gtod_reduce=1 \
-        --name=DATA_OLTP_8K --filename={{ data_file }} --bs=8k --rw=randrw --rwmixread=70 --iodepth=32 --numjobs=4 \
+        --name=DATA_OLTP_8K --filename={{ data_file }} --bs=8k --rw=randrw --rwmixread=70 --iodepth=64 --numjobs=8 \
         --name=WAL_SYNC_8K  --filename={{ wal_file }}  --bs=8k --rw=write --iodepth=1 --sync=1 \
-        --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=2 --sync=1 \
+        --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=4 --sync=1 \
         > {{ output_dir }}/benchmark_results.json
-      args:
-        executable: /bin/bash
 
-    - name: 5. Read and Parse JSON results
+    - name: 5. Read JSON Results
       slurp:
         src: "{{ output_dir }}/benchmark_results.json"
       register: fio_json_raw
 
-    - name: 6. Display Formatted Performance Report
+    - name: 6. HEADER - Storage Specifications
+      debug:
+        msg: 
+          - "======================================================================"
+          - "PURE STORAGE //ST PERFORMANCE REPORT (NVMe-oF RoCE)"
+          - "Target: 18M IOPS | 200GB/s BW | Sub-1ms Latency"
+          - "Architecture: No Dedupe/Compression (Ultra-Low Latency Path)"
+          - "======================================================================"
+
+    - name: 7. DETAIL - Per Volume Results
       vars:
         fio_data: "{{ fio_json_raw.content | b64decode | from_json }}"
       debug:
-        msg: |
-          ======================================================================
-          PURE STORAGE //ST PERFORMANCE REPORT (NVMe-oF RoCE)
-          ======================================================================
-          Specs: 18M IOPS | 200GB/s BW | Ultra-Low Latency
-          ======================================================================
-          {% for job in fio_data.jobs %}
-          {% set write_lat = job.get('write', {}).get('clat_ns', {}).get('percentile', {}) %}
-          {% set read_lat = job.get('read', {}).get('clat_ns', {}).get('percentile', {}) %}
-          {% set p99_raw = write_lat.get('99.000000', 0) if write_lat.get('99.000000', 0) > 0 else read_lat.get('99.000000', 0) %}
-          {% set p99 = (p99_raw | float / 1000) | round(2) %}
-          {% set iops = (job.get('read', {}).get('iops', 0) + job.get('write', {}).get('iops', 0)) | int %}
-          
-          VOLUME/JOB:  {{ job.jobname }}
-          BLOCKSIZE:   {{ job['job options'].bs }}
-          ----------------------------------------------------------------------
-            > IOPS:        {{ "{:,}".format(iops) }}
-            > p99 LATENCY: {{ p99 }} us
-            > STATUS p99:  {{ '✅ PASS (<1ms)' if p99 < 1000 else '❌ FAIL (>1ms)' }}
-          ======================================================================
-          {% endfor %}
+        msg: 
+          - "JOB:         {{ item.jobname }}"
+          - "BLOCKSIZE:   {{ item['job options'].bs }}"
+          - "IOPS:        {{ '{:,.0f}'.format(item.read.iops + item.write.iops) }}"
+          - "THROUGHPUT:  {{ ((item.read.bw_bytes + item.write.bw_bytes) / 1024 / 1024) | round(2) }} MB/s"
+          - "p99 LATENCY: {{ (item.write.clat_ns.percentile['99.000000'] | default(item.read.clat_ns.percentile['99.000000']) | float / 1000) | round(2) }} us"
+          - "STATUS:      {{ '✅ PASS (<1ms)' if (item.write.clat_ns.percentile['99.000000'] | default(item.read.clat_ns.percentile['99.000000']) | float / 1000) < 1000 else '❌ FAIL (>1ms)' }}"
+          - "----------------------------------------------------------------------"
+      loop: "{{ fio_data.jobs }}"
+      loop_control:
+        label: "{{ item.jobname }}"
