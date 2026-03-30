@@ -41,21 +41,17 @@
 
     - name: 6. Performance Report
       debug:
-        msg: 
-          - "======================================================================"
-          - "PURE STORAGE //ST - PERFORMANCE REPORT"
-          - "Specs: 18M IOPS | 200GB/s BW | NVMe-oF (ROCE)"
-          - "======================================================================"
-          - "JOB:         {{ item.jobname }}"
-          - "BLOCKSIZE:   {{ item['job options'].bs }}"
-          - "IOPS:        {{ '{:,.0f}'.format(item.get('read', {}).get('iops', 0) + item.get('write', {}).get('iops', 0)) }}"
-          - "THROUGHPUT:  {{ ((item.get('read', {}).get('bw_bytes', 0) + item.get('write', {}).get('bw_bytes', 0)) / 1024 / 1024) | round(2) }} MB/s"
-          - "AVG LATENCY: {{ ( (item.get('read',{}).get('lat_ns',{}).get('mean',0) + item.get('write',{}).get('lat_ns',{}).get('mean',0)) / 1000 ) | round(2) }} us"
-          - "p99 LATENCY: {{ p99_val }} us"
-          - "----------------------------------------------------------------------"
-      loop: "{{ fio_data.jobs }}"
-      vars:
-        p99_val: >-
-          {%- set r_p = item.get('read', {}).get('lat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
-          {%- set w_p = item.get('write', {}).get('lat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
-          {{ ([r_p, w_p] | max / 1000) | round(2) }}
+        msg: |
+          ======================================================================
+          PURE STORAGE //ST - PERFORMANCE REPORT
+          ======================================================================
+          Specs: 18M IOPS | 200GB/s BW | NVMe-oF (ROCE)
+          ======================================================================
+          {% for job in fio_data.jobs %}
+          JOB:         {{ job.jobname }}
+          BLOCKSIZE:   {{ job['job options'].bs }}
+          IOPS:        {{ (job.get('read', {}).get('iops', 0) + job.get('write', {}).get('iops', 0)) | int }}
+          THROUGHPUT:  {{ ((job.get('read', {}).get('bw_bytes', 0) + job.get('write', {}).get('bw_bytes', 0)) / 1024 / 1024) | round(2) }} MB/s
+          AVG LATENCY: {{ ((job.get('read',{}).get('lat_ns',{}).get('mean',0) + job.get('write',{}).get('lat_ns',{}).get('mean',0)) / 1000) | round(2) }} us
+          ----------------------------------------------------------------------
+          {% endfor %}
