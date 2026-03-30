@@ -1,0 +1,65 @@
+---
+- name: Localhost Multi-Volume Benchmark - Pure Storage FlashArray//ST
+  hosts: localhost
+  connection: local
+  become: yes
+  vars:
+    # Mount points for your Pure ST volumes
+    data_mount: "/pg-data"
+    wal_mount: "/pg-wal"
+    data_file: "/pg-data/test_data.fio"
+    wal_file: "/pg-wal/test_wal.fio"
+    
+    runtime_sec: 120
+    output_dir: "/tmp/fio_results"
+
+  tasks:
+    - name: 1. Pre-flight check - Ensure mount points exist
+      assert:
+        that:
+          - ansible_mounts | selectattr('mount', 'equalto', data_mount) | list | length > 0
+          - ansible_mounts | selectattr('mount', 'equalto', wal_mount) | list | length > 0
+        fail_msg: "ERROR: One or more mount points are missing. Check /pg-data and /pg-wal."
+
+    - name: 2. Create results directory
+      file:
+        path: "{{ output_dir }}"
+        state: directory
+
+    - name: 3. Run Consolidated Multi-Volume FIO (Postgres Profiles)
+      shell: |
+        fio --ioengine=io_uring --direct=1 --group_reporting --time_based \
+        --runtime={{ runtime_sec }} --output-format=json --gtod_reduce=1 \
+        --name=DATA_OLTP_8K --filename={{ data_file }} --bs=8k --rw=randrw --rwmixread=70 --iodepth=64 --numjobs=8 --size=10G \
+        --name=WAL_SYNC_8K  --filename={{ wal_file }}  --bs=8k --rw=write --iodepth=1 --sync=1 --size=2G \
+        --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=4 --sync=1 --size=5G \
+        > {{ output_dir }}/benchmark_results.json
+      args:
+        executable: /bin/bash
+
+    - name: 4. Read JSON results
+      slurp:
+        src: "{{ output_dir }}/benchmark_results.json"
+      register: fio_json_raw
+
+    - name: 5. Parse FIO Results
+      set_fact:
+        fio_data: "{{ fio_json_raw.content | b64decode | from_json }}"
+
+    - name: 6. Performance Summary Report (p99 < 1ms Target)
+      debug:
+        msg: |
+          ==========================================================
+          PURE STORAGE //ST PERFORMANCE REPORT - LOCALHOST
+          ==========================================================
+          {% for job in fio_data.jobs %}
+          CATEGORY:    {{ job.jobname }}
+          BLOCKSIZE:   {{ job['job options'].bs }}
+          ----------------------------------------------------------
+          Avg IOPS:    {{ (job.read.iops | default(0) + job.write.iops | default(0)) | round(0) }}
+          Throughput:  {{ ((job.read.bw_bytes | default(0) + job.write.bw_bytes | default(0)) / 1024 / 1024) | round(2) }} MB/s
+          p99 Latency: {{ (job.write.clat_ns.percentile['99.000000'] | default(job.read.clat_ns.percentile['99.000000']) / 1000) | round(2) }} us
+          STATUS p99:  {{ 'PASS (<1ms)' if (job.write.clat_ns.percentile['99.000000'] | default(0) < 1000000) else 'FAIL (>1ms)' }}
+          ----------------------------------------------------------
+          {% endfor %}
+          Storage Specs: 18M IOPS / 200GB/s / No Data Reduction [cite: 5, 31, 66]
