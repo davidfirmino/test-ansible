@@ -54,7 +54,7 @@
           - "======================================================================"
           - "PURE STORAGE //ST PERFORMANCE REPORT (NVMe-oF RoCE)"
           - "Target: 18M IOPS | 200GB/s BW | Consistent Ultra-Low Latency"
-          - "Design: Bypasses Latency-Inducing Functionality"
+          - "Architecture: Bypasses Latency-Inducing Functionality"
           - "======================================================================"
 
     - name: 8. DETAIL - Per Volume Results
@@ -64,14 +64,15 @@
           - "BLOCKSIZE:   {{ item['job options'].bs }}"
           - "IOPS:        {{ '{:,.0f}'.format(item.get('read', {}).get('iops', 0) + item.get('write', {}).get('iops', 0)) }}"
           - "THROUGHPUT:  {{ ((item.get('read', {}).get('bw_bytes', 0) + item.get('write', {}).get('bw_bytes', 0)) / 1024 / 1024) | round(2) }} MB/s"
-          - "p99 LATENCY: {{ p99_val }} us"
-          - "STATUS:      {{ '✅ PASS (<1ms)' if p99_val < 1000 else '❌ FAIL (>1ms)' }}"
+          - "p99 LATENCY: {{ p99_display }} us"
+          - "STATUS:      {{ '✅ PASS (<1ms)' if (p99_display | float) < 1000 else '❌ FAIL (>1ms)' }}"
           - "----------------------------------------------------------------------"
       loop: "{{ fio_results.jobs }}"
       loop_control:
         label: "{{ item.jobname }}"
       vars:
-        p99_val: >-
+        # Extrai o p99 de leitura ou escrita e converte para microssegundos (us)
+        p99_display: >-
           {%- set r_p = item.get('read', {}).get('clat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
           {%- set w_p = item.get('write', {}).get('clat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
           {%- set max_p = [r_p, w_p] | max -%}
