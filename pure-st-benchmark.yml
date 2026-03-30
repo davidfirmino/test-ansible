@@ -4,10 +4,12 @@
   connection: local
   become: yes
   vars:
+    # Mount points for your Pure ST volumes
     data_mount: "/pg-data"
     wal_mount: "/pg-wal"
     data_file: "/pg-data/test_data.fio"
     wal_file: "/pg-wal/test_wal.fio"
+    
     runtime_sec: 120
     output_dir: "/tmp/fio_results"
 
@@ -16,18 +18,22 @@
       shell: |
         prlimit --pid $$ --memlock=unlimited:unlimited
         sysctl -w fs.aio-max-nr=1048576
+      ignore_errors: yes
 
     - name: 2. Pre-flight Check - Verify Mounts
       assert:
         that:
           - ansible_mounts | selectattr('mount', 'equalto', data_mount) | list | length > 0
           - ansible_mounts | selectattr('mount', 'equalto', wal_mount) | list | length > 0
+        fail_msg: "ERROR: Pure ST volumes not found at {{ data_mount }} or {{ wal_mount }}."
 
     - name: 3. Pre-allocate Test Files (Avoid FS Metadata Latency)
       shell: |
         mkdir -p {{ output_dir }}
         fallocate -l 10G {{ data_file }}
         fallocate -l 5G {{ wal_file }}
+      args:
+        creates: "{{ data_file }}"
 
     - name: 4. Run Multi-Volume FIO (Postgres Profiles)
       shell: |
@@ -37,6 +43,8 @@
         --name=WAL_SYNC_8K  --filename={{ wal_file }}  --bs=8k --rw=write --iodepth=1 --sync=1 \
         --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=4 --sync=1 \
         > {{ output_dir }}/benchmark_results.json
+      args:
+        executable: /bin/bash
 
     - name: 5. Read JSON Results
       slurp:
@@ -48,8 +56,8 @@
         msg: 
           - "======================================================================"
           - "PURE STORAGE //ST PERFORMANCE REPORT (NVMe-oF RoCE)"
-          - "Target: 18M IOPS | 200GB/s BW | Sub-1ms Latency"
-          - "Architecture: No Dedupe/Compression (Ultra-Low Latency Path)"
+          - "Target: 18M IOPS | 200GB/s BW | Consistent Ultra-Low Latency"
+          - "Design: Bypasses Dedupe/Compression for Ultra-Performance"
           - "======================================================================"
 
     - name: 7. DETAIL - Per Volume Results
@@ -59,11 +67,17 @@
         msg: 
           - "JOB:         {{ item.jobname }}"
           - "BLOCKSIZE:   {{ item['job options'].bs }}"
-          - "IOPS:        {{ '{:,.0f}'.format(item.read.iops + item.write.iops) }}"
-          - "THROUGHPUT:  {{ ((item.read.bw_bytes + item.write.bw_bytes) / 1024 / 1024) | round(2) }} MB/s"
-          - "p99 LATENCY: {{ (item.write.clat_ns.percentile['99.000000'] | default(item.read.clat_ns.percentile['99.000000']) | float / 1000) | round(2) }} us"
-          - "STATUS:      {{ '✅ PASS (<1ms)' if (item.write.clat_ns.percentile['99.000000'] | default(item.read.clat_ns.percentile['99.000000']) | float / 1000) < 1000 else '❌ FAIL (>1ms)' }}"
+          - "IOPS:        {{ '{:,.0f}'.format(item.get('read', {}).get('iops', 0) + item.get('write', {}).get('iops', 0)) }}"
+          - "THROUGHPUT:  {{ ((item.get('read', {}).get('bw_bytes', 0) + item.get('write', {}).get('bw_bytes', 0)) / 1024 / 1024) | round(2) }} MB/s"
+          - "p99 LATENCY: {{ p99_val }} us"
+          - "STATUS:      {{ '✅ PASS (<1ms)' if p99_val < 1000 else '❌ FAIL (>1ms)' }}"
           - "----------------------------------------------------------------------"
       loop: "{{ fio_data.jobs }}"
       loop_control:
         label: "{{ item.jobname }}"
+      vars:
+        p99_val: >-
+          {%- set r_p = item.get('read', {}).get('clat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
+          {%- set w_p = item.get('write', {}).get('clat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
+          {%- set max_p = [r_p, w_p] | max -%}
+          {{ (max_p / 1000) | round(2) }}
