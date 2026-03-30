@@ -45,7 +45,7 @@
           - "----------------------------------------------------------------------"
       loop: "{{ fio_data.jobs }}"
       vars:
-     
+        # 0000
         p_obj: "{{ item.write if item.write.iops > 0 else item.read }}"
         avg_val: "{{ (p_obj.lat_ns.mean / 1000) | round(2) }}"
         p99_val: "{{ (p_obj.lat_ns.percentile['99.000000'] / 1000) | round(2) }}"
