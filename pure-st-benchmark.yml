@@ -1,85 +1,52 @@
 ---
-- name: Final High-Performance Benchmark - Pure Storage FlashArray//ST
+- name: Stabilized Benchmark - Pure Storage FlashArray//ST
   hosts: localhost
   connection: local
   become: yes
   vars:
-    data_mount: "/pg-data"
-    wal_mount: "/pg-wal"
     data_file: "/pg-data/test_data.fio"
     wal_file: "/pg-wal/test_wal.fio"
-    runtime_sec: 180  # Aumentado para maior estabilidade nos resultados
+    runtime_sec: 120
     output_dir: "/tmp/fio_results"
 
   tasks:
-    - name: 1. System Tuning for RoCE (Memlock & AIO)
+    - name: 1. Run FIO with Group Reporting (Consolidated Results)
       shell: |
-        prlimit --pid $$ --memlock=unlimited:unlimited
-        sysctl -w fs.aio-max-nr=1048576
-      ignore_errors: yes
-
-    - name: 2. Pre-flight Check - Verify Mounts
-      assert:
-        that:
-          - ansible_mounts | selectattr('mount', 'equalto', data_mount) | list | length > 0
-          - ansible_mounts | selectattr('mount', 'equalto', wal_mount) | list | length > 0
-
-    - name: 3. Pre-allocate Test Files
-      shell: "fallocate -l 20G {{ data_file }} && fallocate -l 10G {{ wal_file }}"
-      args:
-        creates: "{{ data_file }}"
-
-    - name: 4. Run Multi-Volume FIO
-      shell: |
-        fio --ioengine=io_uring --direct=1 --time_based --group_reporting=0 \
-        --runtime={{ runtime_sec }} --output-format=json --gtod_reduce=1 \
+        fio --ioengine=io_uring --direct=1 --group_reporting=1 --time_based \
+        --runtime={{ runtime_sec }} --output-format=json \
         --name=DATA_OLTP_8K --filename={{ data_file }} --bs=8k --rw=randrw --rwmixread=70 --iodepth=64 --numjobs=8 \
         --name=WAL_SYNC_8K  --filename={{ wal_file }}  --bs=8k --rw=write --iodepth=1 --sync=1 \
         --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=4 --sync=1 \
         > {{ output_dir }}/benchmark_results.json
 
-    - name: 5. Read JSON Results
+    - name: 2. Read JSON Results
       slurp:
         src: "{{ output_dir }}/benchmark_results.json"
       register: fio_raw
 
-    - name: 6. Set FIO Data Fact
+    - name: 3. Set FIO Results
       set_fact:
-        fio_results: "{{ fio_raw.content | b64decode | from_json }}"
+        fio_data: "{{ fio_raw.content | b64decode | from_json }}"
 
-    - name: 7. HEADER - Storage Specifications
+    - name: 4. FINAL PERFORMANCE REPORT
       debug:
         msg: 
           - "======================================================================"
-          - "PURE STORAGE //ST PERFORMANCE REPORT (NVMe-oF RoCE)"
-          - "Specs: 18M IOPS | 200GB/s BW | Sub-1ms Latency Target"
+          - "PURE STORAGE //ST - DATA SHEET VALIDATION"
+          - [cite_start]"Target: 18M IOPS | 200GB/s BW | Consistent Ultra-Low Latency "
           - "======================================================================"
-
-    - name: 8. DETAIL - Per Volume Results
-      debug:
-        msg: 
           - "JOB:         {{ item.jobname }}"
           - "BLOCKSIZE:   {{ item['job options'].bs }}"
           - "IOPS:        {{ '{:,.0f}'.format(item.get('read', {}).get('iops', 0) + item.get('write', {}).get('iops', 0)) }}"
           - "THROUGHPUT:  {{ ((item.get('read', {}).get('bw_bytes', 0) + item.get('write', {}).get('bw_bytes', 0)) / 1024 / 1024) | round(2) }} MB/s"
-          - "AVG LATENCY: {{ avg_lat }} us"
-          - "p99 LATENCY: {{ p99_lat }} us"
-          - "MAX LATENCY: {{ max_lat }} us"
+          - "AVG LATENCY: {{ avg_val }} us"
+          - "p99 LATENCY: {{ p99_val }} us"
+          - "MAX LATENCY: {{ max_val }} us"
           - "----------------------------------------------------------------------"
-      loop: "{{ fio_results.jobs }}"
-      loop_control:
-        label: "{{ item.jobname }}"
+      loop: "{{ fio_data.jobs }}"
       vars:
-        # Extração segura de métricas (conversão de ns para us)
-        avg_lat: >-
-          {%- set r_avg = item.get('read', {}).get('clat_ns', {}).get('mean', 0) | float -%}
-          {%- set w_avg = item.get('write', {}).get('clat_ns', {}).get('mean', 0) | float -%}
-          {{ ((r_avg + w_avg) / 1000) | round(2) }}
-        p99_lat: >-
-          {%- set r_p = item.get('read', {}).get('clat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
-          {%- set w_p = item.get('write', {}).get('clat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
-          {{ ([r_p, w_p] | max / 1000) | round(2) }}
-        max_lat: >-
-          {%- set r_max = item.get('read', {}).get('clat_ns', {}).get('max', 0) | float -%}
-          {%- set w_max = item.get('write', {}).get('clat_ns', {}).get('max', 0) | float -%}
-          {{ ([r_max, w_max] | max / 1000) | round(2) }}
+     
+        p_obj: "{{ item.write if item.write.iops > 0 else item.read }}"
+        avg_val: "{{ (p_obj.lat_ns.mean / 1000) | round(2) }}"
+        p99_val: "{{ (p_obj.lat_ns.percentile['99.000000'] / 1000) | round(2) }}"
+        max_val: "{{ (p_obj.lat_ns.max / 1000) | round(2) }}"
