@@ -1,0 +1,4 @@
+fio --ioengine=io_uring --direct=1 --group_reporting=1 --time_based --runtime=120 \
+--name=DATA_OLTP_8K --filename=/pg-data/test_data.fio --bs=8k --rw=randrw --rwmixread=70 --iodepth=64 --numjobs=8 \
+--name=WAL_SYNC_8K  --filename=/pg-wal/test_wal.fio  --bs=8k --rw=write --iodepth=1 --sync=1 \
+--name=WAL_AGG_2MB  --filename=/pg-wal/test_wal.fio  --bs=2M --rw=write --iodepth=4 --sync=1
