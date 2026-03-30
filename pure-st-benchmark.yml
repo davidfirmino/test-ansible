@@ -12,35 +12,41 @@
     output_dir: "/tmp/fio_results"
 
   tasks:
-    - name: 1. Pre-flight check - Verify Pure ST mount points
+    - name: 1. System Tuning - Increase Memlock limits
+      shell: |
+        prlimit --pid $$ --memlock=unlimited:unlimited
+        sysctl -w fs.aio-max-nr=1048576
+
+    - name: 2. Pre-flight check - Verify Pure ST mount points
       assert:
         that:
           - ansible_mounts | selectattr('mount', 'equalto', data_mount) | list | length > 0
           - ansible_mounts | selectattr('mount', 'equalto', wal_mount) | list | length > 0
         fail_msg: "CRITICAL: Mount points not found. Ensure NVMe-oF volumes are mounted."
 
-    - name: 2. Create results directory
-      file:
-        path: "{{ output_dir }}"
-        state: directory
+    - name: 3. Create results directory and Pre-allocate files
+      shell: |
+        mkdir -p {{ output_dir }}
+        fallocate -l 10G {{ data_file }}
+        fallocate -l 5G {{ wal_file }}
 
-    - name: 3. Run Consolidated Multi-Volume FIO
+    - name: 4. Run Consolidated Multi-Volume FIO
       shell: |
         fio --ioengine=io_uring --direct=1 --group_reporting --time_based \
         --runtime={{ runtime_sec }} --output-format=json --gtod_reduce=1 \
-        --name=DATA_OLTP_8K --filename={{ data_file }} --bs=8k --rw=randrw --rwmixread=70 --iodepth=64 --numjobs=8 --size=10G \
-        --name=WAL_SYNC_8K  --filename={{ wal_file }}  --bs=8k --rw=write --iodepth=1 --sync=1 --size=2G \
-        --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=4 --sync=1 --size=5G \
+        --name=DATA_OLTP_8K --filename={{ data_file }} --bs=8k --rw=randrw --rwmixread=70 --iodepth=32 --numjobs=4 \
+        --name=WAL_SYNC_8K  --filename={{ wal_file }}  --bs=8k --rw=write --iodepth=1 --sync=1 \
+        --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=2 --sync=1 \
         > {{ output_dir }}/benchmark_results.json
       args:
         executable: /bin/bash
 
-    - name: 4. Read JSON results
+    - name: 5. Read and Parse JSON results
       slurp:
         src: "{{ output_dir }}/benchmark_results.json"
       register: fio_json_raw
 
-    - name: 5. Display Formatted Performance Report
+    - name: 6. Display Formatted Performance Report
       vars:
         fio_data: "{{ fio_json_raw.content | b64decode | from_json }}"
       debug:
@@ -48,8 +54,7 @@
           ======================================================================
           PURE STORAGE //ST PERFORMANCE REPORT (NVMe-oF RoCE)
           ======================================================================
-          Specs: 18M IOPS [cite: 5, 19, 66] | 200GB/s BW [cite: 66] | Ultra-Low Latency [cite: 6, 17]
-          Design: Bypasses Dedupe & Compression for Peak performance [cite: 11, 31]
+          Specs: 18M IOPS | 200GB/s BW | Ultra-Low Latency
           ======================================================================
           {% for job in fio_data.jobs %}
           {% set write_lat = job.get('write', {}).get('clat_ns', {}).get('percentile', {}) %}
@@ -57,15 +62,12 @@
           {% set p99_raw = write_lat.get('99.000000', 0) if write_lat.get('99.000000', 0) > 0 else read_lat.get('99.000000', 0) %}
           {% set p99 = (p99_raw | float / 1000) | round(2) %}
           {% set iops = (job.get('read', {}).get('iops', 0) + job.get('write', {}).get('iops', 0)) | int %}
-          {% set bw_mb = ((job.get('read', {}).get('bw_bytes', 0) + job.get('write', {}).get('bw_bytes', 0)) / 1024 / 1024) | round(2) %}
           
           VOLUME/JOB:  {{ job.jobname }}
           BLOCKSIZE:   {{ job['job options'].bs }}
           ----------------------------------------------------------------------
             > IOPS:        {{ "{:,}".format(iops) }}
-            > THROUGHPUT:  {{ bw_mb }} MB/s
             > p99 LATENCY: {{ p99 }} us
             > STATUS p99:  {{ '✅ PASS (<1ms)' if p99 < 1000 else '❌ FAIL (>1ms)' }}
           ======================================================================
           {% endfor %}
-          [cite_start]Architecture: Modular, Stateless, and High Availability [cite: 14, 39]
