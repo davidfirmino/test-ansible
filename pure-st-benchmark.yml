@@ -1,36 +1,40 @@
 ---
-- name: Localhost Multi-Volume Benchmark - Pure Storage FlashArray//ST
+- name: Localhost High-Performance Benchmark - Pure Storage FlashArray//ST
   hosts: localhost
   connection: local
   become: yes
   vars:
+    # Target mount points for PostgreSQL
     data_mount: "/pg-data"
     wal_mount: "/pg-wal"
+    
+    # Test files (Directly on the Pure ST volumes)
     data_file: "/pg-data/test_data.fio"
     wal_file: "/pg-wal/test_wal.fio"
+    
     runtime_sec: 120
     output_dir: "/tmp/fio_results"
 
   tasks:
-    - name: 1. Pre-flight check - Ensure mount points exist
+    - name: 1. Pre-flight check - Verify Pure ST mount points
       assert:
         that:
           - ansible_mounts | selectattr('mount', 'equalto', data_mount) | list | length > 0
           - ansible_mounts | selectattr('mount', 'equalto', wal_mount) | list | length > 0
-        fail_msg: "ERROR: One or more mount points are missing. Check /pg-data and /pg-wal."
+        fail_msg: "CRITICAL: Mount points /pg-data or /pg-wal not found. Check your Pure ST RoCE connections."
 
     - name: 2. Create results directory
       file:
         path: "{{ output_dir }}"
         state: directory
 
-    - name: 3. Run Consolidated Multi-Volume FIO
+    - name: 3. Run Consolidated Multi-Volume FIO (Postgres Profiles)
       shell: |
         fio --ioengine=io_uring --direct=1 --group_reporting --time_based \
         --runtime={{ runtime_sec }} --output-format=json --gtod_reduce=1 \
-        --name=DATA_OLTP_8K --filename={{ data_file }} --bs=8k --rw=randrw --rwmixread=70 --iodepth=64 --numjobs=8 --size=10G \
-        --name=WAL_SYNC_8K  --filename={{ wal_file }}  --bs=8k --rw=write --iodepth=1 --sync=1 --size=2G \
-        --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=4 --sync=1 --size=5G \
+        --name=DATA_OLTP_8K --filename={{ data_file }} --bs=8k --rw=randrw --rwmixread=70 --iodepth=64 --numjobs=8 --size=20G \
+        --name=WAL_SYNC_8K  --filename={{ wal_file }}  --bs=8k --rw=write --iodepth=1 --sync=1 --size=5G \
+        --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=4 --sync=1 --size=10G \
         > {{ output_dir }}/benchmark_results.json
       args:
         executable: /bin/bash
@@ -40,24 +44,29 @@
         src: "{{ output_dir }}/benchmark_results.json"
       register: fio_json_raw
 
-    - name: 5. Display Performance Report
+    - name: 5. Display Formatted Performance Report
       vars:
         fio_data: "{{ fio_json_raw.content | b64decode | from_json }}"
       debug:
         msg: |
-          ==========================================================
-          PURE STORAGE //ST PERFORMANCE REPORT (FIXED)
-          ==========================================================
+          ======================================================================
+          PURE STORAGE //ST PERFORMANCE REPORT (NVMe-oF RoCE)
+          ======================================================================
+          System Specs: 18M IOPS [cite: 19] | 200GB/s BW  | Sub-1ms Latency [cite: 19]
+          Architecture: Bypasses Dedupe/Compression for Ultra-Performance [cite: 31]
+          ======================================================================
           {% for job in fio_data.jobs %}
-          {% set lat_obj = job.write.clat_ns if job.write.iops > 0 else job.read.clat_ns %}
-          {% set p99_val = lat_obj.percentile['99.000000'] | default(0) | float / 1000 %}
-          CATEGORY:    {{ job.jobname }}
+          {% set p99 = (job.write.clat_ns.percentile['99.000000'] | default(job.read.clat_ns.percentile['99.000000']) | float / 1000) | round(2) %}
+          {% set iops = (job.read.iops + job.write.iops) | int %}
+          {% set bw_mb = ((job.read.bw_bytes + job.write.bw_bytes) / 1024 / 1024) | round(2) %}
+          
+          VOLUME/JOB:  {{ job.jobname }}
+          TARGET PATH: {{ job['job options'].filename }}
           BLOCKSIZE:   {{ job['job options'].bs }}
-          ----------------------------------------------------------
-          Avg IOPS:    {{ (job.read.iops + job.write.iops) | round(0) }}
-          Throughput:  {{ ((job.read.bw_bytes + job.write.bw_bytes) / 1024 / 1024) | round(2) }} MB/s
-          p99 Latency: {{ p99_val | round(2) }} us
-          STATUS p99:  {{ 'PASS (<1ms)' if p99_val < 1000 else 'FAIL (>1ms)' }}
-          ----------------------------------------------------------
+          ----------------------------------------------------------------------
+            > IOPS:        {{ "{:,}".format(iops) }}
+            > THROUGHPUT:  {{ bw_mb }} MB/s
+            > p99 LATENCY: {{ p99 }} us
+            > STATUS p99:  {{ '✅ PASS (<1ms)' if p99 < 1000 else '❌ FAIL (>1ms)' }}
+          ======================================================================
           {% endfor %}
-          Storage: 18M IOPS [cite: 19] | 200GB/s  | Consistent Low Latency [cite: 6]
