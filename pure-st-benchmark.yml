@@ -8,7 +8,7 @@
     wal_mount: "/pg-wal"
     data_file: "/pg-data/test_data.fio"
     wal_file: "/pg-wal/test_wal.fio"
-    runtime_sec: 120
+    runtime_sec: 180  # Aumentado para maior estabilidade nos resultados
     output_dir: "/tmp/fio_results"
 
   tasks:
@@ -23,23 +23,22 @@
         that:
           - ansible_mounts | selectattr('mount', 'equalto', data_mount) | list | length > 0
           - ansible_mounts | selectattr('mount', 'equalto', wal_mount) | list | length > 0
-        fail_msg: "ERROR: Pure ST volumes not found at {{ data_mount }} or {{ wal_mount }}."
 
     - name: 3. Pre-allocate Test Files
-      shell: "fallocate -l 10G {{ data_file }} && fallocate -l 5G {{ wal_file }}"
+      shell: "fallocate -l 20G {{ data_file }} && fallocate -l 10G {{ wal_file }}"
       args:
         creates: "{{ data_file }}"
 
     - name: 4. Run Multi-Volume FIO
       shell: |
-        fio --ioengine=io_uring --direct=1 --group_reporting --time_based \
+        fio --ioengine=io_uring --direct=1 --time_based --group_reporting=0 \
         --runtime={{ runtime_sec }} --output-format=json --gtod_reduce=1 \
         --name=DATA_OLTP_8K --filename={{ data_file }} --bs=8k --rw=randrw --rwmixread=70 --iodepth=64 --numjobs=8 \
         --name=WAL_SYNC_8K  --filename={{ wal_file }}  --bs=8k --rw=write --iodepth=1 --sync=1 \
         --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=4 --sync=1 \
         > {{ output_dir }}/benchmark_results.json
 
-    - name: 5. Read and Parse JSON Results
+    - name: 5. Read JSON Results
       slurp:
         src: "{{ output_dir }}/benchmark_results.json"
       register: fio_raw
@@ -53,8 +52,7 @@
         msg: 
           - "======================================================================"
           - "PURE STORAGE //ST PERFORMANCE REPORT (NVMe-oF RoCE)"
-          - "Target: 18M IOPS | 200GB/s BW | Consistent Ultra-Low Latency"
-          - "Architecture: Bypasses Latency-Inducing Functionality"
+          - "Specs: 18M IOPS | 200GB/s BW | Sub-1ms Latency Target"
           - "======================================================================"
 
     - name: 8. DETAIL - Per Volume Results
@@ -64,16 +62,24 @@
           - "BLOCKSIZE:   {{ item['job options'].bs }}"
           - "IOPS:        {{ '{:,.0f}'.format(item.get('read', {}).get('iops', 0) + item.get('write', {}).get('iops', 0)) }}"
           - "THROUGHPUT:  {{ ((item.get('read', {}).get('bw_bytes', 0) + item.get('write', {}).get('bw_bytes', 0)) / 1024 / 1024) | round(2) }} MB/s"
-          - "p99 LATENCY: {{ p99_display }} us"
-          - "STATUS:      {{ '✅ PASS (<1ms)' if (p99_display | float) < 1000 else '❌ FAIL (>1ms)' }}"
+          - "AVG LATENCY: {{ avg_lat }} us"
+          - "p99 LATENCY: {{ p99_lat }} us"
+          - "MAX LATENCY: {{ max_lat }} us"
           - "----------------------------------------------------------------------"
       loop: "{{ fio_results.jobs }}"
       loop_control:
         label: "{{ item.jobname }}"
       vars:
-        # Extrai o p99 de leitura ou escrita e converte para microssegundos (us)
-        p99_display: >-
+        # Extração segura de métricas (conversão de ns para us)
+        avg_lat: >-
+          {%- set r_avg = item.get('read', {}).get('clat_ns', {}).get('mean', 0) | float -%}
+          {%- set w_avg = item.get('write', {}).get('clat_ns', {}).get('mean', 0) | float -%}
+          {{ ((r_avg + w_avg) / 1000) | round(2) }}
+        p99_lat: >-
           {%- set r_p = item.get('read', {}).get('clat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
           {%- set w_p = item.get('write', {}).get('clat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
-          {%- set max_p = [r_p, w_p] | max -%}
-          {{ (max_p / 1000) | round(2) }}
+          {{ ([r_p, w_p] | max / 1000) | round(2) }}
+        max_lat: >-
+          {%- set r_max = item.get('read', {}).get('clat_ns', {}).get('max', 0) | float -%}
+          {%- set w_max = item.get('write', {}).get('clat_ns', {}).get('max', 0) | float -%}
+          {{ ([r_max, w_max] | max / 1000) | round(2) }}
