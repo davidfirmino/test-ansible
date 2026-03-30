@@ -10,7 +10,18 @@
     output_dir: "/tmp/fio_results"
 
   tasks:
-    - name: 1. Run FIO with Group Reporting (Consolidated Results)
+    - name: 1. System Tuning for RoCE
+      shell: |
+        prlimit --pid $$ --memlock=unlimited:unlimited
+        sysctl -w fs.aio-max-nr=1048576
+      ignore_errors: yes
+
+    - name: 2. Create Results Directory
+      file:
+        path: "{{ output_dir }}"
+        state: directory
+
+    - name: 3. Run Multi-Volume FIO
       shell: |
         fio --ioengine=io_uring --direct=1 --group_reporting=1 --time_based \
         --runtime={{ runtime_sec }} --output-format=json \
@@ -19,34 +30,32 @@
         --name=WAL_AGG_2MB  --filename={{ wal_file }}  --bs=2M --rw=write --iodepth=4 --sync=1 \
         > {{ output_dir }}/benchmark_results.json
 
-    - name: 2. Read JSON Results
+    - name: 4. Read JSON Results
       slurp:
         src: "{{ output_dir }}/benchmark_results.json"
       register: fio_raw
 
-    - name: 3. Set FIO Results
+    - name: 5. Set FIO Results Fact
       set_fact:
         fio_data: "{{ fio_raw.content | b64decode | from_json }}"
 
-    - name: 4. FINAL PERFORMANCE REPORT
+    - name: 6. Performance Report
       debug:
         msg: 
           - "======================================================================"
-          - "PURE STORAGE //ST - DATA SHEET VALIDATION"
-          - [cite_start]"Target: 18M IOPS | 200GB/s BW | Consistent Ultra-Low Latency "
+          - "PURE STORAGE //ST - PERFORMANCE REPORT"
+          - "Specs: 18M IOPS | 200GB/s BW | NVMe-oF (ROCE)"
           - "======================================================================"
           - "JOB:         {{ item.jobname }}"
           - "BLOCKSIZE:   {{ item['job options'].bs }}"
           - "IOPS:        {{ '{:,.0f}'.format(item.get('read', {}).get('iops', 0) + item.get('write', {}).get('iops', 0)) }}"
           - "THROUGHPUT:  {{ ((item.get('read', {}).get('bw_bytes', 0) + item.get('write', {}).get('bw_bytes', 0)) / 1024 / 1024) | round(2) }} MB/s"
-          - "AVG LATENCY: {{ avg_val }} us"
+          - "AVG LATENCY: {{ ( (item.get('read',{}).get('lat_ns',{}).get('mean',0) + item.get('write',{}).get('lat_ns',{}).get('mean',0)) / 1000 ) | round(2) }} us"
           - "p99 LATENCY: {{ p99_val }} us"
-          - "MAX LATENCY: {{ max_val }} us"
           - "----------------------------------------------------------------------"
       loop: "{{ fio_data.jobs }}"
       vars:
-        # 0000
-        p_obj: "{{ item.write if item.write.iops > 0 else item.read }}"
-        avg_val: "{{ (p_obj.lat_ns.mean / 1000) | round(2) }}"
-        p99_val: "{{ (p_obj.lat_ns.percentile['99.000000'] / 1000) | round(2) }}"
-        max_val: "{{ (p_obj.lat_ns.max / 1000) | round(2) }}"
+        p99_val: >-
+          {%- set r_p = item.get('read', {}).get('lat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
+          {%- set w_p = item.get('write', {}).get('lat_ns', {}).get('percentile', {}).get('99.000000', 0) | float -%}
+          {{ ([r_p, w_p] | max / 1000) | round(2) }}
