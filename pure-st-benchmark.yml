@@ -4,12 +4,10 @@
   connection: local
   become: yes
   vars:
-    # Mount points for your Pure ST volumes
     data_mount: "/pg-data"
     wal_mount: "/pg-wal"
     data_file: "/pg-data/test_data.fio"
     wal_file: "/pg-wal/test_wal.fio"
-    
     runtime_sec: 120
     output_dir: "/tmp/fio_results"
 
@@ -26,7 +24,7 @@
         path: "{{ output_dir }}"
         state: directory
 
-    - name: 3. Run Consolidated Multi-Volume FIO (Postgres Profiles)
+    - name: 3. Run Consolidated Multi-Volume FIO
       shell: |
         fio --ioengine=io_uring --direct=1 --group_reporting --time_based \
         --runtime={{ runtime_sec }} --output-format=json --gtod_reduce=1 \
@@ -37,29 +35,29 @@
       args:
         executable: /bin/bash
 
-    - name: 4. Read JSON results
+    - name: 4. Read and Parse JSON results
       slurp:
         src: "{{ output_dir }}/benchmark_results.json"
       register: fio_json_raw
 
-    - name: 5. Parse FIO Results
-      set_fact:
+    - name: 5. Display Performance Report
+      vars:
         fio_data: "{{ fio_json_raw.content | b64decode | from_json }}"
-
-    - name: 6. Performance Summary Report (p99 < 1ms Target)
       debug:
         msg: |
           ==========================================================
-          PURE STORAGE //ST PERFORMANCE REPORT - LOCALHOST
+          PURE STORAGE //ST PERFORMANCE REPORT (FIXED)
           ==========================================================
           {% for job in fio_data.jobs %}
+          {% set lat_obj = job.write.clat_ns if job.write.iops > 0 else job.read.clat_ns %}
+          {% set p99_val = lat_obj.percentile['99.000000'] | default(0) | float / 1000 %}
           CATEGORY:    {{ job.jobname }}
           BLOCKSIZE:   {{ job['job options'].bs }}
           ----------------------------------------------------------
-          Avg IOPS:    {{ (job.read.iops | default(0) + job.write.iops | default(0)) | round(0) }}
-          Throughput:  {{ ((job.read.bw_bytes | default(0) + job.write.bw_bytes | default(0)) / 1024 / 1024) | round(2) }} MB/s
-          p99 Latency: {{ (job.write.clat_ns.percentile['99.000000'] | default(job.read.clat_ns.percentile['99.000000']) / 1000) | round(2) }} us
-          STATUS p99:  {{ 'PASS (<1ms)' if (job.write.clat_ns.percentile['99.000000'] | default(0) < 1000000) else 'FAIL (>1ms)' }}
+          Avg IOPS:    {{ (job.read.iops + job.write.iops) | round(0) }}
+          Throughput:  {{ ((job.read.bw_bytes + job.write.bw_bytes) / 1024 / 1024) | round(2) }} MB/s
+          p99 Latency: {{ p99_val | round(2) }} us
+          STATUS p99:  {{ 'PASS (<1ms)' if p99_val < 1000 else 'FAIL (>1ms)' }}
           ----------------------------------------------------------
           {% endfor %}
-          Storage Specs: 18M IOPS / 200GB/s / No Data Reduction [cite: 5, 31, 66]
+          Storage: 18M IOPS [cite: 19] | 200GB/s  | Consistent Low Latency [cite: 6]
