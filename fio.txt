@@ -38,3 +38,13 @@ fio --ioengine=io_uring --direct=1 --group_reporting --time_based --runtime=1800
 --log_avg_msec=1000 \
 --write_lat_log=pure_st_stress_lat --write_iops_log=pure_st_stress_iops \
 --percentile_list=50:90:95:99:99.9:99.99
+
+
+fio --ioengine=io_uring --direct=1 --group_reporting --time_based --runtime=1800 \
+--name=HEAVY_BLOCK_SEQUENCE --directory=/pg-data --size=100G --filename=heavy_seq.fio \
+--rw=randrw --rwmixread=65 \
+--bssplit=8k/10:64k/10:128k/20:1m/30:2m/30 \
+--iodepth=128 --numjobs=4 \
+--log_avg_msec=1000 \
+--write_lat_log=pure_heavy_lat --write_bw_log=pure_heavy_bw \
+--percentile_list=50:90:95:99:99.9:99.99
