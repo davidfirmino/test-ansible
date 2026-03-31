@@ -28,3 +28,13 @@ fio --ioengine=io_uring --direct=1 --group_reporting --time_based --runtime=302 
 --rate_iops=18800 \
 --iodepth=32 --numjobs=4 \
 --percentile_list=50:90:95:99:99.9:99.99
+
+
+fio --ioengine=io_uring --direct=1 --group_reporting --time_based --runtime=1800 \
+--name=PGDATA_ULTRA_STRESS --directory=/pg-data --size=100G --filename=heavy_stress.fio \
+--rw=randrw --rwmixread=65 \
+--bssplit=8k/75:64k/15:128k/5:1m/3:2m/2 \
+--iodepth=64 --numjobs=4 \
+--log_avg_msec=1000 \
+--write_lat_log=pure_st_stress_lat --write_iops_log=pure_st_stress_iops \
+--percentile_list=50:90:95:99:99.9:99.99
