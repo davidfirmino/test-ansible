@@ -18,3 +18,13 @@ fio --ioengine=io_uring --direct=1 --group_reporting=1 --time_based --runtime=30
 
 
 bpftrace -e 'tracepoint:nvme:nvme_complete_rq { printf("Tempo: %s | Latência: %d ns | Disco: %d\n", strftime("%H:%M:%S", nsecs), args->latency, args->ctrl_id); }'
+
+
+
+fio --ioengine=io_uring --direct=1 --group_reporting --time_based --runtime=302 \
+--name=PGDATA_REPLICA_PROD --directory=/pg-data --size=50G --filename=test_file.fio \
+--rw=randrw --rwmixread=65 \
+--bssplit=8k/90:16k/7:128k/3 \
+--rate_iops=18800 \
+--iodepth=32 --numjobs=4 \
+--percentile_list=50:90:95:99:99.9:99.99
