@@ -51,3 +51,17 @@ fio --ioengine=io_uring --direct=1 --group_reporting --time_based --runtime=1800
 
 
 bpftrace -e 'tracepoint:block:block_rq_complete { @us = hist(args->nr_sector * 512); @latency = hist(args->duration / 1000); }'
+
+
+
+bpftrace -e '
+tracepoint:block:block_rq_issue {
+    @start[args->dev, args->sector] = nsecs;
+}
+
+tracepoint:block:block_rq_complete 
+/@start[args->dev, args->sector]/ {
+    $lat = (nsecs - @start[args->dev, args->sector]) / 1000;
+    @latency_us = hist($lat);
+    delete(@start[args->dev, args->sector]);
+}'
