@@ -48,3 +48,6 @@ fio --ioengine=io_uring --direct=1 --group_reporting --time_based --runtime=1800
 --log_avg_msec=1000 \
 --write_lat_log=pure_heavy_lat --write_bw_log=pure_heavy_bw \
 --percentile_list=50:90:95:99:99.9:99.99
+
+
+bpftrace -e 'tracepoint:block:block_rq_complete { @us = hist(args->nr_sector * 512); @latency = hist(args->duration / 1000); }'
