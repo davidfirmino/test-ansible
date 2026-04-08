@@ -65,3 +65,7 @@ tracepoint:block:block_rq_complete
     @latency_us = hist($lat);
     delete(@start[args->dev, args->sector]);
 }'
+
+
+
+sed -i 's/= str(args->rwbs);/= args->rwbs;/' io_histogram.sh
