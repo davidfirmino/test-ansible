@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# collect_ebpf_v4.1.sh - In-Kernel Histogram Generation (Fixed Map Dump)
+# collect_ebpf_v4.2.sh - In-Kernel Histogram Generation (Fixed Dev_t Math)
 set -euo pipefail
 
-DEV="dm-3"
+DEV="nvme1n1"                              # ATENCAO: Ajuste para dm-3 ou nvme1n1 conforme seu teste
 DURATION=300
 OUTDIR="/var/log/san_debug"
 
@@ -10,20 +10,22 @@ mkdir -p "$OUTDIR"
 TS="$(date +%Y%m%d_%H%M%S)"
 PREFIX="${OUTDIR}/${TS}_${DEV}"
 
+# Calcula o Major e Minor do dispositivo
 MAJ=$(stat -L -c %t "/dev/$DEV")
 MIN=$(stat -L -c %T "/dev/$DEV")
-DEV_DEC=$((16#$MAJ * 256 + 16#$MIN))
 
-echo "=== STARTING KERNEL HISTOGRAM CAPTURE v4.1 ==="
-echo "  Target  : /dev/$DEV (ID: $DEV_DEC)"
+# CONSERTO DA CAUSA RAIZ: Calculo moderno do dev_t no Linux (Major << 20 | Minor)
+MAJ_DEC=$((16#$MAJ))
+MIN_DEC=$((16#$MIN))
+DEV_DEC=$(( (MAJ_DEC << 20) | MIN_DEC ))
+
+echo "=== STARTING KERNEL HISTOGRAM CAPTURE v4.2 ==="
+echo "  Target  : /dev/$DEV (Major: $MAJ_DEC, Minor: $MIN_DEC)"
+echo "  Kernel ID: $DEV_DEC"
 echo "  Duration: ${DURATION}s"
 
-# bpftrace engine:
-# 1. Filtramos tudo por DEV_DEC logo na entrada.
-# 2. Simplificamos a chave do mapa apenas para 'sector' para poupar CPU/RAM.
-# 3. Adicionamos o bloco END para limpar os I/Os orfãos e exibir SÓ os histogramas.
 echo "[*] Activating in-kernel bpftrace engine..."
-env BPFTRACE_MAP_KEYS=3000000 bpftrace -e '
+env BPFTRACE_MAP_KEYS=500000 bpftrace -e '
 tracepoint:block:block_rq_issue /args->dev == '$DEV_DEC'/ {
     @start[args->sector] = nsecs;
 }
@@ -49,9 +51,12 @@ for ((i=1; i<=DURATION; i++)); do
 done
 
 echo -e "\n[*] Stopping collectors..."
+# Dá o sinal para o bpftrace imprimir os histogramas e encerrar
 kill -SIGINT $PID_BPF 2>/dev/null || true
+
+# IMPORTANTE: Espera 3 segundos para dar tempo do bpftrace escrever no arquivo
+sleep 3 
 pkill -P $$ 2>/dev/null || true
-sleep 3 # Tempo extra para o bpftrace processar o bloco END e limpar a memória
 
 echo "[*] Packaging data..."
 zip -j -m "${PREFIX}_bundle.zip" "${PREFIX}"* 1>/dev/null
