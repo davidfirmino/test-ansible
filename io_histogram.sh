@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# io_histogram.sh - Block I/O Latency & Size Histogram via bpftrace
-# Usage: ./io_histogram.sh <device> [duration_seconds]
-# Example: ./io_histogram.sh dm-2 300
+# io_histogram.sh
 set -euo pipefail
 
 DEV="${1:-dm-2}"
@@ -11,7 +9,6 @@ mkdir -p "$OUTDIR"
 TS="$(date +%Y%m%d_%H%M%S)"
 OUTFILE="${OUTDIR}/${TS}_${DEV}_histograms.log"
 
-# Compute kernel dev_t (modern Linux: major << 20 | minor)
 if [[ ! -b "/dev/$DEV" ]]; then
     echo "ERROR: /dev/$DEV is not a block device" >&2
     exit 1
@@ -27,89 +24,73 @@ echo "=== IO HISTOGRAM CAPTURE ==="
 echo "  Device     : /dev/$DEV  (major=${MAJ_DEC}, minor=${MIN_DEC}, kernel_id=${DEV_DEC})"
 echo "  Duration   : ${DURATION}s"
 echo "  Output     : ${OUTFILE}"
-echo "  [Ctrl+C or wait ${DURATION}s to print histograms]"
+echo ""
+
+# Detecta qual par de tracepoints esta disponivel
+if bpftrace -l 'tracepoint:block:block_io_start' 2>/dev/null | grep -q block_io_start; then
+    TP_START="block_io_start"
+    TP_DONE="block_io_done"
+else
+    TP_START="block_rq_insert"
+    TP_DONE="block_rq_complete"
+fi
+
+echo "  Tracepoints: block:${TP_START} / block:${TP_DONE}"
 echo ""
 
 bpftrace -e "
 config = { max_map_keys = 2000000 }
 
-tracepoint:block:block_rq_issue /args->dev == ${DEV_DEC}/ {
-    @start[args->sector] = nsecs;
-    @rw[args->sector]    = args->rwbs;
-    @sz[args->sector]    = (uint64)args->nr_sector * 512;
+tracepoint:block:${TP_START} /args->dev == ${DEV_DEC}/ {
+    @start[args->dev, args->sector] = nsecs;
+    @rwbs[args->dev, args->sector]  = str(args->rwbs);
+    @sz[args->dev, args->sector]    = (uint64)args->nr_sector * 512;
 }
 
-tracepoint:block:block_rq_complete /args->dev == ${DEV_DEC}/ {
-    \$st = @start[args->sector];
+tracepoint:block:${TP_DONE} /args->dev == ${DEV_DEC}/ {
+    \$st = @start[args->dev, args->sector];
     if (\$st == 0) { return; }
 
     \$lat_us   = (nsecs - \$st) / 1000;
-    \$sz_bytes = @sz[args->sector];
-    \$rwbs     = @rw[args->sector];
+    \$sz_bytes = @sz[args->dev, args->sector];
+    \$rw       = @rwbs[args->dev, args->sector];
 
-    // All I/O
     @lat_all_us   = hist(\$lat_us);
     @sz_all_bytes = hist(\$sz_bytes);
 
-    // Reads (rwbs starts with R: \"R\", \"RA\", \"RS\", etc.)
-    if (strncmp(\$rwbs, \"R\", 1) == 0) {
+    if (\$rw == \"R\" || \$rw == \"RA\" || \$rw == \"RS\" || \$rw == \"RAS\") {
         @lat_read_us   = hist(\$lat_us);
         @sz_read_bytes = hist(\$sz_bytes);
-    }
-
-    // Writes (rwbs starts with W: \"W\", \"WS\", \"WB\", etc.)
-    if (strncmp(\$rwbs, \"W\", 1) == 0) {
+    } else if (\$rw == \"W\" || \$rw == \"WS\" || \$rw == \"WB\" || \$rw == \"WBS\") {
         @lat_write_us   = hist(\$lat_us);
         @sz_write_bytes = hist(\$sz_bytes);
     }
 
-    delete(@start[args->sector]);
-    delete(@rw[args->sector]);
-    delete(@sz[args->sector]);
+    delete(@start[args->dev, args->sector]);
+    delete(@rwbs[args->dev, args->sector]);
+    delete(@sz[args->dev, args->sector]);
 }
 
-interval:s:${DURATION} {
-    exit();
-}
+interval:s:${DURATION} { exit(); }
 
 END {
-    printf(\"\n\");
-    printf(\"╔══════════════════════════════════════════════════════════╗\n\");
+    printf(\"\n╔══════════════════════════════════════════════════════════╗\n\");
     printf(\"║         LATENCY HISTOGRAMS (microseconds, log2)          ║\n\");
     printf(\"╚══════════════════════════════════════════════════════════╝\n\");
-
-    printf(\"\n--- ALL I/O ---\n\");
-    print(@lat_all_us);
-
-    printf(\"\n--- READS ONLY ---\n\");
-    print(@lat_read_us);
-
-    printf(\"\n--- WRITES ONLY ---\n\");
-    print(@lat_write_us);
+    printf(\"\n--- ALL I/O ---\n\");     print(@lat_all_us);
+    printf(\"\n--- READS ONLY ---\n\");  print(@lat_read_us);
+    printf(\"\n--- WRITES ONLY ---\n\"); print(@lat_write_us);
 
     printf(\"\n╔══════════════════════════════════════════════════════════╗\n\");
     printf(\"║            IO SIZE HISTOGRAMS (bytes, log2)              ║\n\");
     printf(\"╚══════════════════════════════════════════════════════════╝\n\");
+    printf(\"\n--- ALL I/O ---\n\");     print(@sz_all_bytes);
+    printf(\"\n--- READS ONLY ---\n\");  print(@sz_read_bytes);
+    printf(\"\n--- WRITES ONLY ---\n\"); print(@sz_write_bytes);
 
-    printf(\"\n--- ALL I/O ---\n\");
-    print(@sz_all_bytes);
-
-    printf(\"\n--- READS ONLY ---\n\");
-    print(@sz_read_bytes);
-
-    printf(\"\n--- WRITES ONLY ---\n\");
-    print(@sz_write_bytes);
-
-    // Suppress auto-print of raw maps
-    clear(@start);
-    clear(@rw);
-    clear(@sz);
-    clear(@lat_all_us);
-    clear(@lat_read_us);
-    clear(@lat_write_us);
-    clear(@sz_all_bytes);
-    clear(@sz_read_bytes);
-    clear(@sz_write_bytes);
+    clear(@start); clear(@rwbs); clear(@sz);
+    clear(@lat_all_us); clear(@lat_read_us); clear(@lat_write_us);
+    clear(@sz_all_bytes); clear(@sz_read_bytes); clear(@sz_write_bytes);
 }
 " 2>&1 | tee "$OUTFILE"
 
