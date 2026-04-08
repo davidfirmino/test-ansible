@@ -69,3 +69,19 @@ tracepoint:block:block_rq_complete
 
 
 sed -i 's/= str(args->rwbs);/= args->rwbs;/' io_histogram.sh
+
+
+
+
+fio --name=mixed_chaos \
+    --filename=/dev/dm-3 \
+    --ioengine=libaio \
+    --direct=1 \
+    --rw=randrw \
+    --rwmixread=70 \
+    --bssplit=4k/50:64k/30:1m/20 \
+    --iodepth=64 \
+    --numjobs=4 \
+    --time_based \
+    --runtime=60 \
+    --group_reporting
