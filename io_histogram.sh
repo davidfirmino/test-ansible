@@ -1,116 +1,99 @@
 #!/usr/bin/env bash
-# io_histogram_targeted.sh
+# io_histogram_v6.sh - Auto-Discover Omni-Capture
 set -euo pipefail
 
-DEV="${1:-dm-2}"
-DURATION="${2:-300}"
+DEV="${1:-dm-3}"
+DURATION="${2:-10}"
 OUTDIR="/var/log/san_debug"
 mkdir -p "$OUTDIR"
 TS="$(date +%Y%m%d_%H%M%S)"
+RAWFILE="${OUTDIR}/${TS}_raw.log"
 OUTFILE="${OUTDIR}/${TS}_${DEV}_histograms.log"
 
-if [[ ! -b "/dev/$DEV" ]]; then
-    echo "ERROR: /dev/$DEV is not a block device" >&2
-    exit 1
-fi
-
-echo "=== IO HISTOGRAM TARGETED CAPTURE v5.1 ==="
+echo "=== IO HISTOGRAM SMART CAPTURE v6.0 ==="
 echo "  Target Device : /dev/$DEV"
 echo "  Duration      : ${DURATION}s"
 
-# 1. Map physical paths (slaves) if the target is a Multipath device (dm-X)
-SLAVES=$(ls -1 /sys/class/block/$DEV/slaves/ 2>/dev/null || echo "")
-if [[ -z "$SLAVES" ]]; then
-    # If there are no slaves, it is a regular physical drive (e.g., sda, nvme1n1)
-    SLAVES="$DEV"
-    echo "  Type          : Direct Physical Device"
+# 1. Descobre todos os discos relacionados (o DM e as pernas fisicas)
+if command -v lsblk >/dev/null 2>&1; then
+    TARGET_DEVS=$(lsblk -n -r -o KNAME -s "/dev/$DEV" | tr '\n' ' ')
 else
-    echo "  Type          : Virtual Multipath (Device Mapper)"
+    TARGET_DEVS="$DEV"
 fi
+echo "  Monitoring    : $TARGET_DEVS"
 
-# 2. Build the BPF filter dynamically based on underlying physical devices
-BPF_FILTER=""
-echo "  Physical Paths:"
-for slave in $SLAVES; do
-    MAJ_HEX=$(stat -L -c '%t' "/dev/$slave")
-    MIN_HEX=$(stat -L -c '%T' "/dev/$slave")
-    MAJ_DEC=$((16#$MAJ_HEX))
-    MIN_DEC=$((16#$MIN_HEX))
-    
-    # Modern Linux kernel dev_t calculation (Major << 20 | Minor)
-    SLAVE_DEV_DEC=$(( (MAJ_DEC << 20) | MIN_DEC ))
-    
-    echo "    -> /dev/$slave (Kernel ID: $SLAVE_DEV_DEC)"
-    
-    if [[ -z "$BPF_FILTER" ]]; then
-        BPF_FILTER="(args->dev == $SLAVE_DEV_DEC)"
-    else
-        BPF_FILTER="$BPF_FILTER || (args->dev == $SLAVE_DEV_DEC)"
-    fi
-done
+echo "[*] Activating Global BPF Capture (gathering all IOs)..."
 
-echo "  Output File   : ${OUTFILE}"
-echo "-----------------------------------------"
-
-# 3. Execute BPFtrace with the targeted filter
-env BPFTRACE_MAP_KEYS=3000000 bpftrace -e "
-
-tracepoint:block:block_rq_issue / $BPF_FILTER / {
+# 2. Captura TUDO do servidor sem filtros estritos
+env BPFTRACE_MAP_KEYS=5000000 bpftrace -e '
+tracepoint:block:block_rq_issue {
     @start[args->dev, args->sector] = nsecs;
-    @sz[args->dev, args->sector]    = args->nr_sector * 512;
-    
-    // Determine if it is a Write (W) or Flush (F) by checking the first character safely
-    @is_write[args->dev, args->sector] = (strncmp(args->rwbs, \"W\", 1) == 0 || strncmp(args->rwbs, \"F\", 1) == 0);
+    @is_w[args->dev, args->sector] = (strncmp(args->rwbs, "W", 1) == 0 || strncmp(args->rwbs, "F", 1) == 0);
 }
-
-tracepoint:block:block_rq_complete / $BPF_FILTER / {
-    \$st = @start[args->dev, args->sector];
-    if (\$st == 0) { return; }
-
-    \$lat_us   = (nsecs - \$st) / 1000;
-    \$sz_bytes = @sz[args->dev, args->sector];
-    \$write    = @is_write[args->dev, args->sector];
-
-    @lat_all_us   = hist(\$lat_us);
-    @sz_all_bytes = hist(\$sz_bytes);
-
-    if (\$write) {
-        @lat_write_us   = hist(\$lat_us);
-        @sz_write_bytes = hist(\$sz_bytes);
-    } else {
-        @lat_read_us   = hist(\$lat_us);
-        @sz_read_bytes = hist(\$sz_bytes);
+tracepoint:block:block_rq_complete {
+    $st = @start[args->dev, args->sector];
+    if ($st != 0) {
+        $lat_us = (nsecs - $st) / 1000;
+        if (@is_w[args->dev, args->sector]) {
+            @lat_write_us[args->dev] = hist($lat_us);
+        } else {
+            @lat_read_us[args->dev] = hist($lat_us);
+        }
+        delete(@start[args->dev, args->sector]);
+        delete(@is_w[args->dev, args->sector]);
     }
-
-    delete(@start[args->dev, args->sector]);
-    delete(@sz[args->dev, args->sector]);
-    delete(@is_write[args->dev, args->sector]);
 }
+interval:s:'$DURATION' { exit(); }
+END { clear(@start); clear(@is_w); }
+' > "$RAWFILE" 2>/dev/null
 
-interval:s:${DURATION} { 
-    printf(\"\n╔══════════════════════════════════════════════════════════╗\n\");
-    printf(\"║         LATENCY HISTOGRAMS (microseconds, log2)          ║\n\");
-    printf(\"╚══════════════════════════════════════════════════════════╝\n\");
-    printf(\"\n--- ALL I/O ---\n\");     print(@lat_all_us);
-    printf(\"\n--- READS ONLY ---\n\");  print(@lat_read_us);
-    printf(\"\n--- WRITES ONLY ---\n\"); print(@lat_write_us);
+echo "[*] Processing and filtering results for $DEV..."
 
-    printf(\"\n╔══════════════════════════════════════════════════════════╗\n\");
-    printf(\"║            IO SIZE HISTOGRAMS (bytes, log2)              ║\n\");
-    printf(\"╚══════════════════════════════════════════════════════════╝\n\");
-    printf(\"\n--- ALL I/O ---\n\");     print(@sz_all_bytes);
-    printf(\"\n--- READS ONLY ---\n\");  print(@sz_read_bytes);
-    printf(\"\n--- WRITES ONLY ---\n\"); print(@sz_write_bytes);
+# 3. Traduz os IDs do Kernel para nomes reais e filtra apenas o que interessa
+python3 -c '
+import sys, os, re
 
-    // Clear memory cleanly without suppressing the screen output
-    clear(@start); clear(@sz); clear(@is_write);
-    clear(@lat_all_us); clear(@lat_read_us); clear(@lat_write_us);
-    clear(@sz_all_bytes); clear(@sz_read_bytes); clear(@sz_write_bytes);
-    
-    printf(\"\n--- Collection Finished ---\n\");
-    exit(); 
-}
-" 2>&1 | tee "$OUTFILE"
+target_devs = sys.argv[1].split()
+raw_file = sys.argv[2]
+out_file = sys.argv[3]
 
-echo ""
-echo "[DONE] Results saved to: $OUTFILE"
+def get_dev_name(dev_t):
+    # Deslocamento de 20 bits do Kernel Linux Moderno
+    maj = dev_t >> 20
+    min = dev_t & 0xFFFFF
+    sys_path = f"/sys/dev/block/{maj}:{min}"
+    if os.path.exists(sys_path):
+        return os.path.basename(os.path.realpath(sys_path))
+    return f"unknown_{dev_t}"
+
+has_data = False
+with open(raw_file, "r") as fin, open(out_file, "w") as fout:
+    fout.write(f"=== LATENCY REPORT FOR: {target_devs[0]} ===\n")
+    keep = False
+    for line in fin:
+        m = re.match(r"^@([a-zA-Z_]+)\[(\d+)\]:", line)
+        if m:
+            map_name = m.group(1)
+            dev_t = int(m.group(2))
+            dev_name = get_dev_name(dev_t)
+            
+            # Só mantém se for o dm-3 ou suas pernas físicas (ex: nvme1n1)
+            if dev_name in target_devs:
+                keep = True
+                has_data = True
+                op = "WRITES" if "write" in map_name else "READS"
+                fout.write(f"\n--- {op} LATENCY (microseconds, log2) | DEVICE: {dev_name} ---\n")
+            else:
+                keep = False
+        elif keep and line.strip():
+            fout.write(line)
+            
+if not has_data:
+    with open(out_file, "a") as fout:
+        fout.write("\n[!] Nenhum I/O registrado para este dispositivo durante a captura.\n")
+        fout.write("Verifique se o FIO esta rodando e enviando carga para as interfaces mapeadas.\n")
+' "$TARGET_DEVS" "$RAWFILE" "$OUTFILE"
+
+echo "[SUCCESS] Report generated: $OUTFILE"
+echo "--------------------------------------------------------"
+cat "$OUTFILE"
