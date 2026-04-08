@@ -6,7 +6,9 @@ def format_size(bytes_val):
     return f"{bytes_val:.0f} B ({bytes_val/1024:.1f} KiB)"
 
 def print_report_section(data, label):
-    if len(data) == 0: return
+    if len(data) == 0: 
+        print(f"\n [{label}] - Sem dados suficientes.")
+        return
     
     lats_ms = data[:, 2] / 1000.0
     sizes = data[:, 1]
@@ -40,22 +42,38 @@ def print_report_section(data, label):
         mask = (lats_ms > low) & (lats_ms <= high)
         if np.any(mask):
             print(f"      {low}-{high:<4} : {np.sum(mask):8} IOs, avg {format_size(np.mean(sizes[mask]))}")
+            
+    mask_gt50 = lats_ms > 50
+    if np.any(mask_gt50):
+        print(f"      >50    : {np.sum(mask_gt50):8} IOs, avg {format_size(np.mean(sizes[mask_gt50]))}")
 
 def main(filename):
     print(f"Analyzing {filename}...")
     raw_list = []
+    
+    # Leitura com filtro anti-lixo (ignora cabecalhos do bpftrace)
     with open(filename, 'r') as f:
         for line in f:
             p = line.split()
-            if len(p) == 3:
-                raw_list.append([1 if p[0]=='R' else 0, int(p[1]), int(p[2])])
+            # Verifica se tem 3 colunas E se a primeira é 'R' ou 'W'
+            if len(p) == 3 and p[0] in ('R', 'W'):
+                try:
+                    # Converte para [Tipo, Tamanho, Latencia_us]
+                    raw_list.append([1 if p[0]=='R' else 0, int(p[1]), int(p[2])])
+                except ValueError:
+                    # Se falhar na conversao do numero, ignora a linha
+                    pass
     
+    if not raw_list:
+        print("Erro: Nenhum dado de I/O valido encontrado no log.")
+        sys.exit(1)
+        
     all_data = np.array(raw_list)
     reads = all_data[all_data[:, 0] == 1]
     writes = all_data[all_data[:, 0] == 0]
     
     print("\n" + "="*40)
-    print("===== SAN DEBUG ANALYZER REPORT v3.40 =====")
+    print("===== SAN DEBUG ANALYZER REPORT v3.41 =====")
     print(f"Workload    : Read {len(reads)/len(all_data)*100:.1f}% / Write {len(writes)/len(all_data)*100:.1f}%")
     print(f"Avg Size    : {format_size(np.mean(all_data[:,1]))}")
     print("="*40)
@@ -65,4 +83,7 @@ def main(filename):
     print_report_section(writes, "WRITES ONLY")
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Uso: python3 analyzer_ebpf.py <arquivo_raw.log>")
+        sys.exit(1)
     main(sys.argv[1])
