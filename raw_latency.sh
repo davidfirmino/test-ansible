@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# raw_latency_kprobe.sh - True Raw Pointer Tracking via kprobes
+# raw_latency.sh - True Raw Pointer Tracking via kprobes
 
 echo "=== STARTING KPROBE CAPTURE (Press Ctrl+C to stop) ==="
 echo "Let it run with FIO for a few seconds, then press Ctrl+C."
