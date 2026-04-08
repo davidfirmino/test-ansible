@@ -1,0 +1,46 @@
+#!/usr/bin/env bpftrace
+
+config = { max_map_keys = 1256000} 
+
+BEGIN {
+    printf("%-10s\t%-16s\t%-10s\t%-10s\t%-8s\n",
+           "TIME", "COMM", "DEV", "TRANSPORT", "LAT(ms)");
+}
+
+tracepoint:block:block_io_start {
+    @start[args->dev, args->sector] = nsecs;
+}
+
+tracepoint:block:block_io_done {
+    $key_time = @start[args->dev, args->sector];
+    if ($key_time == 0) { return; }
+    
+    $lat_ms = (nsecs - $key_time) / 1000000;
+    
+    if ($lat_ms >= 1 && $lat_ms < 500) {
+        /* Decode device major:minor */
+        $dev_major = args->dev >> 20;
+        $dev_minor = args->dev & 0xFFFFF;
+        
+        $transport = "Unknown";
+        if ($dev_major == 259) {
+            $transport = "NVMe";
+        } else if ($dev_major == 8 || $dev_major == 65) {
+            $transport = "SCSI/iSCSI";
+        }
+        
+        printf("%-10s\t%-16s\t%-10d:%d\t%-10s\t%-8d\n",
+               strftime("%H:%M:%S", nsecs),
+               comm,
+               $dev_major,
+               $dev_minor,
+               $transport,
+               $lat_ms);
+    }
+    
+    delete(@start[args->dev, args->sector]);
+}
+
+END {
+    clear(@start);
+}
