@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# collect_ebpf_v4.sh - In-Kernel Histogram Generation
+# collect_ebpf_v4.1.sh - In-Kernel Histogram Generation (Fixed Map Dump)
 set -euo pipefail
 
 DEV="dm-3"
@@ -14,27 +14,29 @@ MAJ=$(stat -L -c %t "/dev/$DEV")
 MIN=$(stat -L -c %T "/dev/$DEV")
 DEV_DEC=$((16#$MAJ * 256 + 16#$MIN))
 
-echo "=== STARTING KERNEL HISTOGRAM CAPTURE v4.0 ==="
+echo "=== STARTING KERNEL HISTOGRAM CAPTURE v4.1 ==="
 echo "  Target  : /dev/$DEV (ID: $DEV_DEC)"
 echo "  Duration: ${DURATION}s"
 
-# bpftrace engine: In-kernel histograms (Zero map-full errors)
+# bpftrace engine:
+# 1. Filtramos tudo por DEV_DEC logo na entrada.
+# 2. Simplificamos a chave do mapa apenas para 'sector' para poupar CPU/RAM.
+# 3. Adicionamos o bloco END para limpar os I/Os orfãos e exibir SÓ os histogramas.
 echo "[*] Activating in-kernel bpftrace engine..."
-bpftrace -e '
-tracepoint:block:block_rq_issue {
-    @start[args->dev, args->sector] = nsecs;
+env BPFTRACE_MAP_KEYS=3000000 bpftrace -e '
+tracepoint:block:block_rq_issue /args->dev == '$DEV_DEC'/ {
+    @start[args->sector] = nsecs;
 }
 tracepoint:block:block_rq_complete /args->dev == '$DEV_DEC'/ {
-    if (@start[args->dev, args->sector]) {
-        // Calculate latency in microseconds
-        $lat = (nsecs - @start[args->dev, args->sector]) / 1000;
-        
-        // Populate histograms
-        @latency_us = hist($lat);
+    $st = @start[args->sector];
+    if ($st != 0) {
+        @latency_us = hist((nsecs - $st) / 1000);
         @io_size_bytes = hist(args->nr_sector * 512);
-        
-        delete(@start[args->dev, args->sector]);
+        delete(@start[args->sector]);
     }
+}
+END {
+    clear(@start);
 }
 ' > "${PREFIX}_histograms.log" &
 PID_BPF=$!
@@ -47,9 +49,9 @@ for ((i=1; i<=DURATION; i++)); do
 done
 
 echo -e "\n[*] Stopping collectors..."
-kill -SIGINT $PID_BPF 2>/dev/null || true # SIGINT forces bpftrace to print histograms
+kill -SIGINT $PID_BPF 2>/dev/null || true
 pkill -P $$ 2>/dev/null || true
-sleep 2 # Give bpftrace time to flush the output
+sleep 3 # Tempo extra para o bpftrace processar o bloco END e limpar a memória
 
 echo "[*] Packaging data..."
 zip -j -m "${PREFIX}_bundle.zip" "${PREFIX}"* 1>/dev/null
