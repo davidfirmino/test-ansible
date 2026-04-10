@@ -1,17 +1,17 @@
--- 1. Calculamos os valores aleatórios no CLIENTE (pgbench)
-\set aid drandom(1, 100000 * :scale)
-\set tid drandom(1, 10 * :scale)
+-- 1. Calculamos os valores usando 'random' (sem o 'd')
+\set aid random(1, 100000 * :scale)
+\set tid random(1, 10 * :scale)
 
--- 2. Iniciamos a transação
+-- 2. Fluxo da transação
 BEGIN;
 
--- 3. Usamos as variáveis (com o prefixo ':') no SQL
+-- 3. Consultas
 SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
 
--- Simulamos o "Active Connection" com um delay no cliente
+-- Simula o delay de 'Active Connection'
 \sleep 50ms
 
--- Simula a contenção de lock
+-- Simula a contenção de lock no teller
 UPDATE pgbench_tellers SET tbalance = tbalance + 1 WHERE tid = :tid;
 
 END;
