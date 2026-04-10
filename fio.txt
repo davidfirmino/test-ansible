@@ -100,3 +100,7 @@ fio --name=pg_wal_batch \
     --sync=1 \
     --runtime=120 \
     --fallocate=none
+
+
+XFS:  mkfs -t xfs -f -d su=16384,sw=8 -K /dev/<devname>
+EXT4:  mkfs -t ext4 -E stride=4,stripe_width=32 -K /dev/<devname>
