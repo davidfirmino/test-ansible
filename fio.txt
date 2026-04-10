@@ -85,3 +85,18 @@ fio --name=mixed_chaos \
     --time_based \
     --runtime=60 \
     --group_reporting
+
+
+
+fio --name=pg_wal_batch \
+    --directory=/pg-wal \
+    --size=10G \
+    --ioengine=libaio \
+    --direct=1 \
+    --rw=write \
+    --bsrange=64k-256k \
+    --iodepth=1 \
+    --numjobs=1 \
+    --sync=1 \
+    --runtime=120 \
+    --fallocate=none
